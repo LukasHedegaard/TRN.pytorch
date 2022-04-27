@@ -7,26 +7,59 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import _init_paths
+import os.path as osp
+import sys
+
+
+def add_path(path):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+# Add lib to PYTHONPATH
+add_path("path/to/TRN.pytorch")
+add_path(osp.join("path/to/TRN.pytorch", "lib"))
+
+
 import utils as utl
 from configs.thumos import parse_trn_args as parse_args
 from models import build_model
 
+
 def main(args):
-    this_dir = osp.join(osp.dirname(__file__), '.')
-    save_dir = osp.join(this_dir, 'checkpoints')
+    this_dir = osp.join(osp.dirname(__file__), ".")
+    save_dir = osp.join(this_dir, "checkpoints")
     if not osp.isdir(save_dir):
         os.makedirs(save_dir)
-    command = 'python ' + ' '.join(sys.argv)
-    logger = utl.setup_logger(osp.join(this_dir, 'log.txt'), command=command)
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    command = "python " + " ".join(sys.argv)
+    logger = utl.setup_logger(osp.join(this_dir, "log.txt"), command=command)
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     utl.set_seed(int(args.seed))
 
     model = build_model(args)
+
+    try:
+        from ptflops import get_model_complexity_info
+
+        def input_constructor(*largs, **lkwargs):
+            return {
+                "camera_inputs": torch.ones(()).new_empty((1, args.enc_steps, 2048)),
+                "sensor_inputs": torch.ones(()).new_empty((1, args.enc_steps, 1024)),
+            }
+
+        flops, params = get_model_complexity_info(
+            model, (0, 0), input_constructor=input_constructor, as_strings=False
+        )
+        print(f"Model FLOPs: {flops}")
+        print(f"Model params: {params}")
+
+    except Exception as e:
+        print(e)
+
     if osp.isfile(args.checkpoint):
-        checkpoint = torch.load(args.checkpoint, map_location=torch.device('cpu'))
-        model.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint = torch.load(args.checkpoint, map_location=torch.device("cpu"))
+        model.load_state_dict(checkpoint["model_state_dict"])
     else:
         model.apply(utl.weights_init)
     if args.distributed:
@@ -34,23 +67,24 @@ def main(args):
     model = model.to(device)
 
     criterion = utl.MultiCrossEntropyLoss(ignore_index=21).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
     if osp.isfile(args.checkpoint):
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         for param_group in optimizer.param_groups:
-            param_group['lr'] = args.lr
-        args.start_epoch += checkpoint['epoch']
+            param_group["lr"] = args.lr
+        args.start_epoch += checkpoint["epoch"]
     softmax = nn.Softmax(dim=1).to(device)
 
     for epoch in range(args.start_epoch, args.start_epoch + args.epochs):
         if epoch == 21:
             args.lr = args.lr * 0.1
             for param_group in optimizer.param_groups:
-                param_group['lr'] = args.lr
+                param_group["lr"] = args.lr
 
         data_loaders = {
-            phase: utl.build_data_loader(args, phase)
-            for phase in args.phases
+            phase: utl.build_data_loader(args, phase) for phase in args.phases
         }
 
         enc_losses = {phase: 0.0 for phase in args.phases}
@@ -64,7 +98,7 @@ def main(args):
 
         start = time.time()
         for phase in args.phases:
-            training = phase=='train'
+            training = phase == "train"
             if training:
                 model.train(True)
             elif not training and args.debug:
@@ -73,8 +107,10 @@ def main(args):
                 continue
 
             with torch.set_grad_enabled(training):
-                for batch_idx, (camera_inputs, motion_inputs, enc_target, dec_target) \
-                        in enumerate(data_loaders[phase], start=1):
+                for (
+                    batch_idx,
+                    (camera_inputs, motion_inputs, enc_target, dec_target),
+                ) in enumerate(data_loaders[phase], start=1):
                     batch_size = camera_inputs.shape[0]
                     camera_inputs = camera_inputs.to(device)
                     motion_inputs = motion_inputs.to(device)
@@ -87,9 +123,11 @@ def main(args):
                     enc_losses[phase] += enc_loss.item() * batch_size
                     dec_losses[phase] += dec_loss.item() * batch_size
                     if args.verbose:
-                        print('Epoch: {:2} | iteration: {:3} | enc_loss: {:.5f} dec_loss: {:.5f}'.format(
-                            epoch, batch_idx, enc_loss.item(), dec_loss.item()
-                        ))
+                        print(
+                            "Epoch: {:2} | iteration: {:3} | enc_loss: {:.5f} dec_loss: {:.5f}".format(
+                                epoch, batch_idx, enc_loss.item(), dec_loss.item()
+                            )
+                        )
 
                     if training:
                         optimizer.zero_grad()
@@ -110,7 +148,7 @@ def main(args):
         end = time.time()
 
         if args.debug:
-            result_file = 'inputs-{}-epoch-{}.json'.format(args.inputs, epoch)
+            result_file = "inputs-{}-epoch-{}.json".format(args.inputs, epoch)
             # Compute result for encoder
             enc_mAP = utl.compute_result_multilabel(
                 args.class_index,
@@ -118,7 +156,7 @@ def main(args):
                 enc_target_metrics,
                 save_dir,
                 result_file,
-                ignore_class=[0,21],
+                ignore_class=[0, 21],
                 save=True,
             )
             # Compute result for decoder
@@ -128,22 +166,36 @@ def main(args):
                 dec_target_metrics,
                 save_dir,
                 result_file,
-                ignore_class=[0,21],
+                ignore_class=[0, 21],
                 save=False,
             )
 
         # Output result
-        logger.output(epoch, enc_losses, dec_losses,
-                      len(data_loaders['train'].dataset), len(data_loaders['test'].dataset),
-                      enc_mAP, dec_mAP, end - start, debug=args.debug)
+        logger.output(
+            epoch,
+            enc_losses,
+            dec_losses,
+            len(data_loaders["train"].dataset),
+            len(data_loaders["test"].dataset),
+            enc_mAP,
+            dec_mAP,
+            end - start,
+            debug=args.debug,
+        )
 
         # Save model
-        checkpoint_file = 'inputs-{}-epoch-{}.pth'.format(args.inputs, epoch)
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.module.state_dict() if args.distributed else model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }, osp.join(save_dir, checkpoint_file))
+        checkpoint_file = "inputs-{}-epoch-{}.pth".format(args.inputs, epoch)
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.module.state_dict()
+                if args.distributed
+                else model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            },
+            osp.join(save_dir, checkpoint_file),
+        )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main(parse_args())
